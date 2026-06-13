@@ -54,18 +54,18 @@ def run_simulation(input_path, tool_info_path, output_path, args=None, service_m
     Interactive Mode: Multi-round conversation (Easy mode only)
     """
     use_vision = False
-
+    # 解析工具信息 这里的目的: 后面要把工具说明塞进服务智能体的系统提示词里，让模型知道有哪些工具可以调用
     with open(tool_info_path, 'r', encoding='utf-8') as f:
         tools_list = json.load(f)
         tool_descriptions = json.dumps(tools_list, indent=2, ensure_ascii=False)
-
+    # 解析样本信息, scenarios 一个列表 [{}, {}, ..., {}]
     if not os.path.exists(input_path):
         print(f"Can't find the file {input_path}.")
         return
 
     with open(input_path, 'r', encoding='utf-8') as f:
         scenarios = json.load(f)
-
+    # 截取任务数
     if args.num_tasks > 0:
         scenarios = scenarios[:args.num_tasks]
 
@@ -110,13 +110,13 @@ def run_simulation(input_path, tool_info_path, output_path, args=None, service_m
             db = OrderDB()
             db.init_from_json(order_init_data)
 
-        user_instruction = sc.get("Instruction", "")
+        user_instruction = sc.get("Instruction", "") # 模拟用户要完成的任务指令
         image_path = sc.get("image_path", None)
         image_path = get_video_url_for_model(image_path, args.service_model_name)
-        image_description = sc.get("image_description", "")
+        image_description = sc.get("image_description", "") # 读取图像/视频描述, 这通常给模拟用户使用，因为前面 use_vision=False
 
         start_time = time.time()
-
+        # 创建一个字典，用来记录当前任务的全部运行信息
         history_log = {
             "task_id": task_id,
             "mode": "text",
@@ -132,21 +132,32 @@ def run_simulation(input_path, tool_info_path, output_path, args=None, service_m
             "agent_response_time_seconds": 0.0,
             "start_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))
         }
-
+        # 生成模拟用户的系统提示词
         user_agent_sys_prompt = USER_TEXT_ONLY_PROMPT_EASY.format(
             user_instruction=user_instruction,
             image_description=image_description,
             original_user_response="",
             evaluation_feedback="",
             history_summary="",
-            service_agent_response="Dear customer, how can I help you?"
+            service_agent_response="Dear customer, how can I help you?" # 模拟一开始服务智能体先说
         )
 
+        """
+        系统：你是顾客，要完成这个任务
+        用户：现在客服问你 “Dear customer, how can I help you?”
+        模型：生成顾客的第一句话
+        """
         user_messages = [
             {"role": "system", "content": user_agent_sys_prompt},
             {"role": "user", "content": "You are a customer in the environment shown in the video, and you need to complete the instructions in **Task**. I am your AI customer service representative; please interact with me in the first person. Let's begin the conversation.\nDear customer, how can I help you?"}
         ]
 
+        """
+        你是客服智能体；
+        你可以调用这些工具；
+        调用工具时必须输出 JSON 数组；
+        不调用工具时输出自然语言。
+        """
         service_agent_sys_prompt = SERVICE_AGENT_PROMPT_BASE.format(tool_descriptions=tool_descriptions)
         service_history = []
 
@@ -155,18 +166,28 @@ def run_simulation(input_path, tool_info_path, output_path, args=None, service_m
         input_tokens_total = 0
         output_tokens_total = 0
         tool_calls_count = 0
-
+        # 初始化模拟用户评估分数   只在启用 args.multi_agent_user 时才有用
         accumulated_original_scores = {}
         accumulated_final_scores = {}
         valid_evaluation_count = 0
 
+        # 保存最近一次服务智能体回复
         last_agent_response_for_check = "Dear customer, how can I help you?"
         summarized_history_str = ""
 
+        """
+        线程 1: 生成对话摘要
+        线程 2: 生成服务智能体回复  
+        """
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
         for turn in range(max_turns):
             user_start_time = time.time()
+            """
+            user_messages        当前用户模型的上下文
+            agent_type="user"    表示这是模拟用户模型
+            service_model_name   用哪个模型
+            """
             user_reply, user_input_tok, user_output_tok = call_llm(user_messages, agent_type="user", service_model_name=args.service_model_name)
             user_gen_time = time.time() - user_start_time
             print(f"[Time] User response generation (Turn {turn}): {user_gen_time:.3f} seconds")
@@ -176,6 +197,15 @@ def run_simulation(input_path, tool_info_path, output_path, args=None, service_m
             check_start_time = time.time()
             if args.multi_agent_user:
                 original_user_reply = user_reply
+                """
+                user_response             原始用户回复
+                user_instruction          原始任务指令
+                image_description         图片/视频描述
+                last_agent_response       上一轮客服回复
+                history                   当前对话历史
+                summarized_history        历史摘要
+                user_mode="easy"          easy 模式
+                """
                 user_reply, evaluation_info = check_user_contradiction(
                     user_response=original_user_reply,
                     user_instruction=user_instruction,
@@ -433,46 +463,46 @@ if __name__ == "__main__":
         "--service_model_name",
         default=SERVICE_MODEL_NAME,
         help="Tested agent model name (default: configured in service_agent_config.py)"
-    )
+    )   # 用的模型名称
 
     parser.add_argument(
         "--scenario",
         choices=["retail", "kitchen", "restaurant", "order"],
         default="retail",
         help="Task scenario"
-    )
+    )   # 任务场景
 
     parser.add_argument(
         "--scenario_number",
         type=int,
         default=1,
         help="Scenario number"
-    )
+    ) # 场景内的任务编号
 
     parser.add_argument(
         "--multi_agent_user",
         action="store_true",
         help="When True, use LLM to check if user response contradicts the task and correct if contradictory"
-    )
+    ) # 启用基于 LLM 的用户回复检查与纠正
 
     parser.add_argument(
         "--summary_user",
         action="store_true",
         help="When True, add a summary module after the user answers to avoid lengthy history information"
-    )
+    ) # 启用对话摘要，以避免历史记录过长
 
     parser.add_argument(
         "--num_tasks",
         type=int,
         default=0,
         help="Number of tasks to test from the beginning of the scenario. 0 means test all tasks."
-    )
+    ) # 要测试的任务数量，0 表示所有任务
 
     args = parser.parse_args()
 
-    INPUT_JSON = f"./scenarios/final/{args.scenario}{args.scenario_number}.json"
-    TOOL_INFO_JSON = f"./tools/{args.scenario}/{args.scenario}_tools.json"
-    OUTPUT_JSON = f"./results/{args.service_model_name}/{args.scenario}{args.scenario_number}_easy.json"
+    INPUT_JSON = f"./scenarios/final/{args.scenario}{args.scenario_number}.json" # 场景训练样本
+    TOOL_INFO_JSON = f"./tools/{args.scenario}/{args.scenario}_tools.json" # 不同场景下的不同工具
+    OUTPUT_JSON = f"./results/{args.service_model_name}/{args.scenario}{args.scenario_number}_easy.json" # 输出的文件(非评估)
     if not os.path.exists(os.path.dirname(OUTPUT_JSON)):
         os.makedirs(os.path.dirname(OUTPUT_JSON))
 
